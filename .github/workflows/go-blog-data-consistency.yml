@@ -1,0 +1,194 @@
+name: go-blog-data-consistency
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  environment:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_SHA: ${{ github.sha }}
+      GITHUB_REF: ${{ github.ref }}
+    steps:
+      - name: Get git source
+        run: |
+          git_source=`echo $GITHUB_REF | sed 's/refs\/heads\///'`
+          git_source=`echo $git_source | sed 's/refs\/tags\///'`
+          git_source=`echo $git_source | sed 's/refs\\///'`
+          echo $git_source
+          echo "git_source=$git_source" >> $GITHUB_ENV
+      - name: Get git SHA
+        run: |
+          git_sha=`echo $GITHUB_SHA`
+          echo $git_sha
+          echo "git_sha=$git_sha" >> $GITHUB_ENV
+      - name: Checkout repository code
+        uses: actions/checkout@v2
+      - name: Get version
+        run: |
+          version_source=`cat /home/runner/work/go-blog-data-consistency/go-blog-data-consistency/version.json | jq '.Version' | sed 's/"//g'`
+          echo $version_source
+          echo "version_source=$version_source" >> $GITHUB_ENV
+      - name: Generate build artifacts
+        run: |
+          mkdir -p /tmp
+          echo ${{ env.version_source }} >> /tmp/version_source
+          echo ${{ env.git_source }} >> /tmp/git_source
+          echo ${{ env.git_sha }} >> /tmp/git_sha
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: artifacts
+          path: |
+            /tmp/version_source
+            /tmp/git_source
+            /tmp/git_sha
+
+  go_test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - name: Setup Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16
+      - name: Go Test
+        run: |
+          cd /home/runner/work/go-blog-data-consistency/go-blog-data-consistency
+          go mod download
+          docker compose up -d mysql
+          go test -v ./... -coverprofile /tmp/go-blog-data-consistency.out | tee /tmp/go-blog-data-consistency.log
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: artifacts
+          path: |
+            /tmp/go-blog-data-consistency.log
+            /tmp/go-blog-data-consistency.out
+
+  docker_build_images:
+    needs: [go_test, environment]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PLATFORM_AMD64: linux/amd64
+      PLATFORM_ARMV7: linux/arm/v7
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: artifacts
+          path: /tmp
+      - name: Get environment
+        run: |
+          version=`cat /tmp/version_source`
+          echo "version=$version" >> $GITHUB_ENV
+          git_source=`cat /tmp/git_source`
+          echo "git_source=$git_source" >> $GITHUB_ENV
+      - name: Check out repository code
+        uses: actions/checkout@v2
+      - name: Build docker images
+        run: |
+          docker build -f ./cmd/Dockerfile . -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }} --build-arg GIT_COMMIT=$GITHUB_SHA --build-arg GIT_BRANCH=${{ env.git_source }}  --build-arg PLATFORM=$PLATFORM_AMD64 --build-arg GO_ARCH=amd64
+          docker build -f ./cmd/Dockerfile . -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }} --build-arg GIT_COMMIT=$GITHUB_SHA --build-arg GIT_BRANCH=${{ env.git_source }}  --build-arg PLATFORM=$PLATFORM_ARMV7 --build-arg GO_ARCH=arm --build-arg GO_ARM=7
+      - name: Generate build artifacts
+        run: |
+          mkdir -p /tmp
+          docker save -o /tmp/go-blog-data-consistency_amd64-${{ env.version }}.tar.gz ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }}
+          docker save -o /tmp/go-blog-data-consistency_armv7-${{ env.version }}.tar.gz ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v2
+        with:
+          name: artifacts
+          path: |
+            /tmp/go-blog-data-consistency_amd64-${{ env.version }}.tar.gz
+            /tmp/go-blog-data-consistency_armv7-${{ env.version }}.tar.gz
+          retention-days: 1
+      - name: Docker clean-up
+        run: |
+          docker image prune -f
+          docker container prune -f
+
+  docker_push_images:
+    needs: [docker_build_images]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: artifacts
+          path: /tmp
+      - name: Get environment
+        run: |
+          version=`cat /tmp/version_source`
+          echo "version=$version" >> $GITHUB_ENV
+      - name: Login to ghcr.io
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Load Docker Images
+        run: |
+          docker load -i /tmp/go-blog-data-consistency_amd64-${{ env.version }}.tar.gz
+          docker load -i /tmp/go-blog-data-consistency_armv7-${{ env.version }}.tar.gz
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_latest
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }}
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_latest
+          docker tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }}
+      - name: Push Docker Images
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_latest
+      - name: Create/Push Docker manifest
+        run: |
+          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }}
+          docker manifest annotate --arch arm --os linux --variant 7 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.version }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_${{ env.version }}
+          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.version }} --purge
+          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:amd64_latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_latest
+          docker manifest annotate --arch arm --os linux --variant 7 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:armv7_latest
+          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest --purge
+      - name: Docker clean-up
+        run: |
+          docker image prune -f
+          docker container prune -f
+
+  git_push_tag:
+    needs: [go_test, docker_push_images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v2
+        with:
+          name: artifacts
+          path: /tmp
+      - name: Get environment
+        run: |
+          version=`cat /tmp/version_source`
+          echo "version=$version" >> $GITHUB_ENV
+      - name: Check out repository code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: "0"
+      - name: Push/Update version
+        uses: anothrNick/github-tag-action@1.36.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          CUSTOM_TAG: v${{ env.version }}

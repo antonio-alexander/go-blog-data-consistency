@@ -38,7 +38,11 @@ RUN apk add jq
 RUN \
     VERSION=`cat /go/src/go-blog-data-consistency/version.json | jq '.Version' | sed 's/"//g'` \
     && cd cmd \
-    && env GOARCH=${GO_ARCH} GOARM=${GO_ARM} GOOS=linux go build -ldflags "-X github.com/antonio-alexander/go-blog-data-consistency/internal.Version=${VERSION} -X github.com/antonio-alexander/go-blog-data-consistency/internal.GitCommit=${GIT_COMMIT} -X github.com/antonio-alexander/go-blog-data-consistency/internal.GitBranch=${GIT_BRANCH}" -o go-blog-data-consistency \
+    && env GOARCH=${GO_ARCH} GOARM=${GO_ARM} GOOS=linux go build -ldflags \
+    "-X github.com/antonio-alexander/go-blog-data-consistency/internal.Version=${VERSION} \
+    -X github.com/antonio-alexander/go-blog-data-consistency/internal.GitCommit=${GIT_COMMIT} \
+    -X github.com/antonio-alexander/go-blog-data-consistency/internal.GitBranch=${GIT_BRANCH}" \
+    -o go-blog-data-consistency \
     && chmod +X go-blog-data-consistency \
     && tar -czvf go-blog-data-consistency.tar.gz ./go-blog-data-consistency
 
